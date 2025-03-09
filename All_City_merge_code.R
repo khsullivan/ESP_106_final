@@ -1,5 +1,5 @@
 cities = c("Boston", "Austin", "Chicago", "Columbus", "Los Angeles", 
-           "New York", "Pittsburgh", "Philadelphia", "San Francisco", "Washington DC", "Jersey City")
+           "New York", "Pittsburgh", "Philadelphia", "San Francisco", "Washington DC")
 merged_data_df = data.frame()
 for (city in cities) {
   bikeshare_data = read.csv("Bikeshare_data.csv")  # Read bikeshare data
