@@ -1,0 +1,395 @@
+---
+title: "ESP106_final_proj"
+output: html_document
+date: "2025-02-07"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+library(zoo)
+library(dplyr)
+## Loading data
+merged_data = read.csv("/Users/kieransullivan/Downloads/AllCitiesMerge.csv")
+merged_data
+## Correcting date 
+merged_data$Date = base::as.Date(merged_data$Date, format = "%m/%d/%y")
+## Ordering by city and date
+merged_data_sorted = merged_data[order(merged_data$City, merged_data$Date),]
+merged_data_sorted$sum_min <- as.numeric(gsub(",", "", merged_data_sorted$sum_min))
+merged_data_sorted$num_trip <- as.numeric(gsub(",", "", merged_data_sorted$num_trip))
+merged_data_sorted
+
+## Creating 28 day window for z-scores
+four_week_window <- function(dataframe, column, suffix) {
+  # Dynamically reference the column using rlang::sym() and !!
+  column_sym <- sym(column)
+  
+  dataframe <- dataframe %>%
+    # Group by City
+    group_by(City) %>%
+    # Use rollapply to calculate the rolling mean and SD with a window of 28 days
+    mutate(
+      rolling_mean = rollapply(!!column_sym, width = 28, FUN = mean, align = "center", fill = NA),
+      rolling_sd = rollapply(!!column_sym, width = 28, FUN = sd, align = "center", fill = NA),
+      # Calculate the z-score for each day
+      z_score = (!!column_sym - rolling_mean) / rolling_sd
+    ) %>%
+    # Remove intermediate columns (optional)
+    select(-rolling_mean, -rolling_sd) %>%
+    # Rename z_score column
+    rename(!!paste0("z_score_", suffix) := z_score)
+  
+  return(dataframe)
+}
+
+column_names_to_z_score = c("sum_min", "num_trip", "TAVG..Degrees.Fahrenheit.", "TMAX..Degrees.Fahrenheit.", "TMIN..Degrees.Fahrenheit.", "PRCP..Inches.", "SNOW..Inches.", "SNWD..Inches.")
+
+for (name in column_names_to_z_score){
+  merged_data_sorted = four_week_window(merged_data_sorted, name, name)
+}
+
+merged_data_sorted$City = as.factor(merged_data_sorted$City)
+merged_data_sorted
+
+unique(merged_data_sorted$City)
+
+merged_data_sorted$Day_Of_Week = weekdays(merged_data_sorted$Date)
+
+library(dplyr)
+
+merged_data_sorted <- merged_data_sorted %>%
+  mutate(weekend_or_weekday = ifelse(Day_Of_Week %in% c("Saturday", "Sunday"), "Weekend", "Weekday"))
+
+merged_data_sorted$weekend_or_weekday = as.factor(merged_data_sorted$weekend_or_weekday)
+
+## Rainfall categorical
+merged_data_sorted <- merged_data_sorted %>%
+  mutate(rainfall_category = case_when(
+    PRCP..Inches. == 0 ~ "no rainfall",
+    PRCP..Inches. > 0 & PRCP..Inches. <= 0.1 ~ "light rainfall",
+    PRCP..Inches. > 0.1 & PRCP..Inches. <= 0.3 ~ "moderate rainfall",
+    PRCP..Inches. > 0.3 ~ "heavy rainfall",
+    TRUE ~ NA_character_
+  ))
+
+## Snowfall categorical
+merged_data_sorted <- merged_data_sorted %>%
+  mutate(snow_category = case_when(
+    SNOW..Inches. == 0 ~ "no snow",
+    SNOW..Inches. > 0 ~ "yes snow",
+    TRUE ~ NA_character_
+  ))
+
+merged_data_sorted$snow_category = as.factor(merged_data_sorted$snow_category)
+merged_data_sorted$rainfall_category = as.factor(merged_data_sorted$rainfall_category)
+
+library(dplyr)
+library(lubridate)
+
+# Step 1: Extract the day of the year (DOY)
+merged_data_sorted <- merged_data_sorted %>%
+  mutate(DOY = yday(Date))  
+
+# Step 2: Compute sine and cosine transformations
+merged_data_sorted <- merged_data_sorted %>%
+  mutate(
+    sin_DOY = sin(2 * pi * DOY / 365), 
+    cos_DOY = cos(2 * pi * DOY / 365)
+  )
+
+### creating temperature and day of year interaction effects
+merged_data_sorted$sin_tmin_doy = (merged_data_sorted$TMIN..Degrees.Fahrenheit. * merged_data_sorted$sin_DOY)
+merged_data_sorted$cos_tmin_doy = (merged_data_sorted$TMIN..Degrees.Fahrenheit. * merged_data_sorted$cos_DOY)
+merged_data_sorted$sin_tmax_doy = (merged_data_sorted$TMAX..Degrees.Fahrenheit. * merged_data_sorted$sin_DOY)
+merged_data_sorted$cos_tmax_doy = (merged_data_sorted$TMAX..Degrees.Fahrenheit. * merged_data_sorted$cos_DOY)
+merged_data_sorted
+
+### Getting all data on the same timeframe
+merged_data_sorted <- merged_data_sorted %>%
+  filter(between(Date, as.Date("2019-06-30"), as.Date("2024-06-30")))
+
+## How many NAs?
+colSums(is.na(merged_data_sorted))
+```
+
+```{r}
+## Making new variable increased/decreased from yesterday
+library(dplyr)
+
+merged_data_sorted <- merged_data_sorted %>%
+  group_by(City) %>%            # Process each city separately
+  arrange(Date) %>%             # Ensure data is sorted by date within each city
+  mutate(ridership_change_num_trip = case_when(
+    is.na(lag(num_trip)) ~ NA_character_,  # For the first day, no previous day exists
+    num_trip > lag(num_trip) ~ "Increased",
+    num_trip <= lag(num_trip) ~ "Decreased"
+  )) %>%
+  ungroup()
+
+merged_data_sorted <- merged_data_sorted %>%
+  group_by(City) %>%            # Process each city separately
+  arrange(Date) %>%             # Ensure data is sorted by date within each city
+  mutate(ridership_change_sum_min = case_when(
+    is.na(lag(sum_min)) ~ NA_character_,  # For the first day, no previous day exists
+    num_trip > lag(sum_min) ~ "Increased",
+    num_trip <= lag(sum_min) ~ "Decreased"
+  )) %>%
+  ungroup()
+
+
+merged_data_sorted$ridership_change_num_trip = as.factor(merged_data_sorted$ridership_change_num_trip)
+merged_data_sorted$ridership_change_sum_min = as.factor(merged_data_sorted$ridership_change_sum_min)
+```
+
+
+```{r}
+## Making linear model
+## Removed several variables that were not contributing
+lin_model_sum_min = lm(z_score_sum_min ~ sin_tmax_doy + cos_tmin_doy + sin_tmin_doy + cos_DOY + sin_DOY + DOY + snow_category + rainfall_category + weekend_or_weekday + z_score_TMAX..Degrees.Fahrenheit. + TMAX..Degrees.Fahrenheit., data = merged_data_sorted)
+summary(lin_model_sum_min)
+### Residual plot - Looks decent!
+plot(lin_model_sum_min$fitted.values, resid(lin_model_sum_min),
+     xlab = "Fitted Values", ylab = "Residuals",
+     main = "Residuals vs Fitted", xlim = c(-2, 2))
+abline(h = 0, col = "red") 
+
+## qqplot - looks good enough to me
+qqnorm(resid(lin_model_sum_min))
+qqline(resid(lin_model_sum_min), col = "red")
+## This histogram looks great! We want it normally distributed
+hist(resid(lin_model_sum_min), breaks = 30, main = "Histogram of Residuals")
+## Predicted vs. real
+plot(lin_model_sum_min$fitted.values, lin_model_sum_min$model$z_score_sum_min, 
+     xlab = "Predicted Values", ylab = "Real Values", 
+     main = "Predicted vs Real Values", xlim = c(-2.5, 2.5), ylim = c(-4,4))
+abline(a = 0, b = 1, col = "red")
+
+
+
+## Repeating for the number of trips instead
+lin_model_num_trip = lm(z_score_num_trip ~ sin_tmax_doy + cos_tmin_doy + sin_tmin_doy + cos_DOY + sin_DOY + DOY + snow_category + rainfall_category + weekend_or_weekday + z_score_TMAX..Degrees.Fahrenheit. + TMAX..Degrees.Fahrenheit., data = merged_data_sorted)
+summary(lin_model_num_trip)
+### Residual plot - Looks decent!
+plot(lin_model_num_trip$fitted.values, resid(lin_model_num_trip),
+     xlab = "Fitted Values", ylab = "Residuals",
+     main = "Residuals vs Fitted", xlim = c(-2, 2))
+abline(h = 0, col = "red") 
+
+## qqplot - looks good enough to me
+qqnorm(resid(lin_model_num_trip))
+qqline(resid(lin_model_num_trip), col = "red")
+## This histogram looks great! We want it normally distributed and it is
+hist(resid(lin_model_num_trip), breaks = 30, main = "Histogram of Residuals")
+## Predicted vs. real
+plot(lin_model_num_trip$fitted.values, lin_model_num_trip$model$z_score_num_trip, 
+     xlab = "Predicted Values", ylab = "Real Values", 
+     main = "Predicted vs Real Values", xlim = c(-2.5, 2.5), ylim = c(-4,4))
+abline(a = 0, b = 1, col = "red")
+
+
+
+### Trying to get RMSE for comparison against other models
+set.seed(31525)
+
+# Remove rows with NAs from the dataset
+merged_data_sorted_clean <- merged_data_sorted[complete.cases(merged_data_sorted), ]
+
+# Sampling cities for training and testing
+split <- sample(1:nrow(merged_data_sorted_clean), 0.7 * nrow(merged_data_sorted_clean))
+train_data <- merged_data_sorted_clean[split, ]
+test_data <- merged_data_sorted_clean[-split, ]
+
+# Fit the linear model for sum min
+lm_model_sum_min <- lm(z_score_sum_min ~ sin_tmax_doy + cos_tmin_doy + sin_tmin_doy + cos_DOY + sin_DOY + DOY + snow_category + rainfall_category + weekend_or_weekday + z_score_TMAX..Degrees.Fahrenheit. + TMAX..Degrees.Fahrenheit., data = train_data)
+
+# Predict on test data
+preds_sum_min <- predict(lm_model_sum_min, test_data)
+
+# Calculate RMSE for sum min
+rmse_sum_min <- sqrt(mean((test_data$z_score_sum_min - preds_sum_min)^2))
+
+print(rmse_sum_min)
+
+## For num trips
+lm_model_num_trip <- lm(z_score_num_trip ~ sin_tmax_doy + cos_tmin_doy + sin_tmin_doy + cos_DOY + sin_DOY + DOY + snow_category + rainfall_category + weekend_or_weekday + z_score_TMAX..Degrees.Fahrenheit. + TMAX..Degrees.Fahrenheit., data = train_data)
+
+# Predict on test data
+preds_num_trips <- predict(lm_model_num_trip, test_data)
+
+# Calculate RMSE
+rmse_num_trips <- sqrt(mean((test_data$z_score_num_trip - preds_num_trips)^2))
+
+print(rmse_num_trips)
+```
+
+```{r}
+### CART Model for sum minutes z-score
+## Splitting based on city
+library(dplyr)
+
+set.seed(31625)  # For reproducibility
+
+# Get the unique cities
+unique_cities <- unique(merged_data_sorted$City)
+
+# Randomly sample 7 cities for the training set
+train_cities <- sample(unique_cities, 7)
+
+# Create train and test sets based on cities
+train_data_cart <- merged_data_sorted %>% filter(City %in% train_cities)
+test_data_cart  <- merged_data_sorted %>% filter(!City %in% train_cities)
+
+library(caret)
+library(rpart)
+library(rpart.plot)
+
+# Build a CART model with rpart; missing values are handled via surrogate splits
+cart_model_sum_min <- rpart(z_score_sum_min ~ sin_tmax_doy + cos_tmin_doy + sin_tmin_doy + cos_tmax_doy + cos_DOY + sin_DOY + DOY + snow_category + rainfall_category + weekend_or_weekday + z_score_TMAX..Degrees.Fahrenheit. + z_score_TMIN..Degrees.Fahrenheit. + TMAX..Degrees.Fahrenheit. + TMIN..Degrees.Fahrenheit., data = train_data_cart, method = "anova")
+
+printcp(cart_model_sum_min)
+
+# Visualize the tree
+rpart.plot(cart_model_sum_min)
+print(cart_model_sum_min)
+
+test_data_cart = na.omit(test_data_cart)
+
+# Make predictions on the test set
+cart_predictions_sum_min <- predict(cart_model_sum_min, test_data_cart)
+
+# Calculate performance metrics
+mae_sum_min <- mean(abs(cart_predictions_sum_min - test_data_cart$z_score_sum_min))
+mse_sum_min <- mean((cart_predictions_sum_min - test_data_cart$z_score_sum_min)^2)
+rmse_sum_min <- sqrt(mse_sum_min)
+rsq_sum_min <- cor(cart_predictions_sum_min, test_data_cart$z_score_sum_min)^2
+
+# Print the results
+cat("Sum Minutes MAE: ", round(mae_sum_min, 4), "\n")
+cat("Sum Minutes MSE: ", round(mse_sum_min, 4), "\n")
+cat("Sum Minutes RMSE: ", round(rmse_sum_min, 4), "\n")
+cat("Sum Minutes R-squared: ", round(rsq_sum_min, 4), "\n")
+```
+
+
+
+```{r}
+### CART Model for num trips
+
+library(caret)
+library(rpart)
+library(rpart.plot)
+
+# Build a CART model with rpart; missing values are handled via surrogate splits
+cart_model_num_trip <- rpart(z_score_num_trip ~ sin_tmax_doy + cos_tmin_doy + sin_tmin_doy + cos_tmax_doy + cos_DOY + sin_DOY + DOY + snow_category + rainfall_category + weekend_or_weekday + z_score_TMAX..Degrees.Fahrenheit. + z_score_TMIN..Degrees.Fahrenheit. + TMAX..Degrees.Fahrenheit. + TMIN..Degrees.Fahrenheit., data = train_data_cart, method = "anova")
+
+printcp(cart_model_num_trip)
+
+# Visualize the tree
+rpart.plot(cart_model_num_trip)
+print(cart_model_num_trip)
+
+test_data_cart = na.omit(test_data_cart)
+
+# Make predictions on the test set
+cart_predictions_num_trip <- predict(cart_model_num_trip, test_data_cart)
+
+# Calculate performance metrics
+mae_num_trip <- mean(abs(cart_predictions_num_trip - test_data_cart$z_score_num_trip))
+mse_num_trip <- mean((cart_predictions_num_trip - test_data_cart$z_score_num_trip)^2)
+rmse_num_trip <- sqrt(mse_num_trip)
+rsq_num_trip <- cor(cart_predictions_num_trip, test_data_cart$z_score_num_trip)^2
+
+# Print the results
+cat("Num Trips MAE: ", round(mae_num_trip, 4), "\n")
+cat("Num Trips MSE: ", round(mse_num_trip, 4), "\n")
+cat("Num Trips RMSE: ", round(rmse_num_trip, 4), "\n")
+cat("Num Trips R-squared: ", round(rsq_num_trip, 4), "\n")
+```
+
+
+```{r}
+## Making a plot of NYC weather data over time
+NYC_only = merged_data_sorted[which(merged_data_sorted$City == 'New York'),]
+NYC_only
+# Plot TMAX vs Date
+plot(NYC_only$Date, NYC_only$TAVG..Degrees.Fahrenheit., type = "p", col = "red2", 
+     ylab = "Temperature (°F)", xlab = "Date", main = "NYC Daily Weather and Bike Trips", ylim = c(0, 122))
+
+# Overlay bike trips: set up a new plot on top
+par(new = TRUE)
+plot(NYC_only$Date, NYC_only$num_trip, type = "p", axes = FALSE, xlab = "", ylab = "", 
+     col = "black", pch = 17, cex = 0.6)
+
+# Add the right-hand axis for bike trips
+axis(side = 4, col = "black", col.axis = "black")
+mtext("Number of Trips", side = 4, line = 3, col = "black")
+
+# Add a legend to explain the colors
+legend("topleft", legend = c("Avg Temp", "# of Trips"), 
+       col = c("red2", "black"), pch = c(1,17))
+```
+
+
+```{r}
+
+### Conditional forest model for sum min and evaluation
+### Dropped variables contributing less than 2%
+
+library(partykit)
+set.seed(42)
+cforest_model_sum_min <- cforest(
+  z_score_sum_min ~ cos_tmin_doy + cos_tmax_doy + rainfall_category + weekend_or_weekday + z_score_TMAX..Degrees.Fahrenheit. + z_score_TMIN..Degrees.Fahrenheit. + TMAX..Degrees.Fahrenheit. + TMIN..Degrees.Fahrenheit.,  # Predicting z-score sum minutes
+  data = train_data,
+)
+
+cforest_predictions_sum_min <- predict(cforest_model_sum_min, test_data, OOB = TRUE)
+
+# Calculate RMSE
+forest_rmse_sum_min <- sqrt(mean((cforest_predictions_sum_min - test_data$z_score_sum_min)^2))
+cat("C Forest RMSE Sum Min:", forest_rmse_sum_min, "\n")
+
+# Calculate R²
+forest_rsq_sum_min <- cor(cforest_predictions_sum_min, test_data$z_score_sum_min)^2
+cat("R²:", forest_rsq_sum_min, "\n")
+
+varimp_sum_min <- varimp(cforest_model_sum_min)
+print(varimp_sum_min) 
+
+```
+```{r}
+### Conditional forest model for sum min and evaluation
+### Dropped variables contributing less than 2%
+
+library(partykit)
+set.seed(42)
+cforest_model_num_trip <- cforest(
+  z_score_num_trip ~ cos_tmin_doy + cos_tmax_doy + rainfall_category + weekend_or_weekday + z_score_TMAX..Degrees.Fahrenheit. + z_score_TMIN..Degrees.Fahrenheit. + TMAX..Degrees.Fahrenheit. + TAVG..Degrees.Fahrenheit. + TMIN..Degrees.Fahrenheit.,  # Predicting z-score num trips
+  data = train_data,
+)
+
+cforest_predictions_num_trip <- predict(cforest_model_num_trip, test_data, OOB = TRUE)
+
+# Calculate RMSE
+forest_rmse_num_trip <- sqrt(mean((cforest_predictions_num_trip - test_data$z_score_num_trip)^2))
+cat("C Forest RMSE Num Trip:", forest_rmse_num_trip, "\n")
+
+# Calculate R²
+forest_rsq_num_trip <- cor(cforest_predictions_num_trip, test_data$z_score_num_trip)^2
+cat("R²:", forest_rsq_num_trip, "\n")
+
+varimp_num_trip <- varimp(cforest_model_num_trip)
+print(varimp_num_trip) 
+
+```
+
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
